@@ -59,24 +59,58 @@ const deleteMovieEntry = async providerId => {
 
 const getProviderFromItem = item => {
     const providers = item?.ProviderIds || {};
-    
+
     if (providers.Tmdb) return `tmdb:${providers.Tmdb}`;
     if (providers.Tvdb) return `tvdb:${providers.Tvdb}`;
     if (providers.Imdb) return `imdb:${providers.Imdb}`;
-    
+
     return null;
 }
 
-const handleMediaAdded = async (providerId, item) => {
+const handleMediaAdded = async (providerId, item, currentISO) => {
+    await setMovieEntry(providerId, {
+        baseline: item.DateCreated,
+        lastSeen: currentISO
+    });
 
+    log.debug(`Added movie entry for ${providerId} (${item.Name})`);
 }
 
-const handleExistingMedia = async (providerId, item, entry) => {
-
+const updateItemDateCreated = async (item, newDateISO) => {
+    const payload = { ...item, DateCreated: newDateISO };
+    await emby.post(`/Items/${item.Id}`, payload);
 }
 
-const handleMediaRemove = async (providerId, entry) => {
+const handleExistingMedia = async (providerId, item, entry, nowISO) => {
+    const baselineISO = entry.baseline || nowISO;
+    const embyItemISO = item.DateCreated;
 
+    const baselineMs = Date.parse(baselineISO);
+    const embyItemMs = Date.parse(embyItemISO);
+
+    let newBaseline = baselineISO;
+
+    if (embyItemMs < baselineMs) {
+        newBaseline = embyItemISO;
+        log.info(`Updating baseline for ${providerId} (${item.Name}) from ${baselineISO} to ${newBaseline}`);
+    }
+    
+    if (embyItemMs > baselineMs) {
+        try {
+            log.info(`Updating Emby date for ${providerId} (${item.Name}) from ${item.DateCreated} to ${newBaseline}`);
+            await updateItemDateCreated(item, newBaseline);
+            return true;
+        } catch (err) {
+            log.error(`Failed to update date for ${providerId} (${item.Name})`, err);
+        }
+    }
+
+    await setMovieEntry(providerId, {
+        baseline: newBaseline,
+        lastSeen: nowISO
+    });
+
+    return false;
 }
 
 const getMoviesPage = async (userId, startIndex, limit) => {
@@ -98,8 +132,9 @@ const sync = async () => {
         log.info('Beginning sync with Emby server...');
 
         const now = new Date();
+        const nowISO = now.toISOString();
         const nowMs = now.getTime();
-        
+
         const seen = new Set();
 
         let created = 0;
@@ -113,39 +148,39 @@ const sync = async () => {
         while (true) {
             const page = await getMoviesPage(EMBY_LIBRARY_VIEW_USER, startIndex, pageSize);
             const items = page.Items;
-            
+
             if (!items.length) break;
 
             for (const item of items) {
-                const providerId = getProviderFromItem(item);
-                const createdAt = item?.DateCreated;
+                try {
+                    const providerId = getProviderFromItem(item);
+    
+                    if (!providerId) {
+                        log.debug(`Skipping item due to missing providerId -- (${item.Name})`);
+                        continue;
+                    };
+    
+                    log.debug(`Processing ${providerId} (${item.Name})`)
+    
+                    seen.add(providerId);
+    
+                    const entry = getMovieEntry(providerId);
+    
+                    if (!entry) {
+                        log.debug(`New media found ${providerId} (${item.Name})`);
+    
+                        await handleMediaAdded(providerId, item, nowISO);
 
-                if (!providerId || !createdAt) {
-                    log.debug(`Skipping item due to missing providerId:${providerId} or createdAt:${createdAt} -- (${item.Name})`);
-                    continue;
-                };
+                        created++;
 
-                log.debug(`Processing ${providerId} (${item.Name})`)
-
-                seen.add(providerId);
-
-                const entry = getMovieEntry(providerId);
-
-                if (!entry) {
-                    log.debug(`New media found ${providerId} (${item.Name})`);
-
-                    await handleMediaAdded(providerId, item);
-                    created++;
-                    continue;
-                }
-
-                const recordedBaseline = entry.baseline;
-                await handleExistingMedia(providerId, item, entry);
-                const actualBaseline = getMovieEntry(providerId);
-                
-                if (actualBaseline !== recordedBaseline) {
-                    log.debug(`Media updated date from ${recordedBaseline} to ${actualBaseline} -- ${providerId} (${item.Name})`);
-                    updated++;
+                        continue;
+                    }
+    
+                    const wasUpdated = await handleExistingMedia(providerId, item, entry, nowISO);
+    
+                    if (wasUpdated) updated++;
+                } catch (err) {
+                    log.error(`Error processing ${item.Name} (${item.Id})`, err);
                 }
             }
 
@@ -154,16 +189,17 @@ const sync = async () => {
         }
 
         for (const [providerId, entry] of Object.entries(db.data.movies)) {
-            if (seen.has(providerId)) continue; 
+            if (seen.has(providerId)) continue;
 
-            await handleMediaRemove(providerId, entry);
             missing++;
 
             const lastSeenMs = Date.parse(entry.lastSeen);
 
+            log.info(nowMs, lastSeenMs, ms(FORGET_TIME))
             if (nowMs - lastSeenMs > ms(FORGET_TIME)) {
-                log.debug(`Deleting ${providerId} from database due to being missing for longer than specified FORGET_TIME.`);
+                log.info(`Deleting ${providerId} from database due to being missing for longer than specified FORGET_TIME.`);
                 await deleteMovieEntry(providerId);
+                missing--;
                 deleted++;
             }
         }
@@ -179,18 +215,30 @@ app.post('/hook', async (req, res) => {
     const event = body.Event;
     const item = body.Item;
 
-    log.info(item);
+    if (event !== 'library.new') {
+        log.info(`Unhandled event received: ${event}`);
+        return res.sendStatus(400);
+    }
 
-    switch (event) {
-        case 'library.mediaadded':
-            log.info('Received media added event...');
-            break;
-        case 'library.mediadeleted':
-            log.info('Received media deleted event...');
-            break;
-        default:
-            log.debug(`Unhandled event received: ${event}`);
-            log.info(body);
+    log.info('Received media added event...');
+
+    if (!['Movie', 'Episode'].includes(item.Type)) {
+        log.info(`Ignoring item of type: ${item.Type}`);
+        return res.sendStatus(200);
+    } 
+
+    const providerId = getProviderFromItem(item);
+
+    if (!providerId) {
+        log.info(`Ignoring item due to missing providerId -- (${item.Name})`);
+        return res.sendStatus(200);
+    }
+
+    const entry = getMovieEntry(providerId);
+    if (!entry) {
+        await handleMediaAdded(providerId, item).catch(log.error);
+    } else {
+        await handleExistingMedia(providerId, item, entry, new Date().toISOString()).catch(log.error);
     }
 
     res.sendStatus(200);
@@ -204,7 +252,7 @@ log.info(`Starting ${pkg.name}_v${pkg.version}`);
 app.listen(PORT, () => log.info(`Webserver listening on port ${PORT}`));
 
 // Initialize Database
-await db.read(); 
+await db.read();
 
 // Begin Syncing
 if (PERFORM_INITIAL_SYNC?.toLowerCase() === 'true') sync();
