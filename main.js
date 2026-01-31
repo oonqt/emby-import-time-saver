@@ -195,7 +195,6 @@ const sync = async () => {
 
             const lastSeenMs = Date.parse(entry.lastSeen);
 
-            log.info(nowMs, lastSeenMs, ms(FORGET_TIME))
             if (nowMs - lastSeenMs > ms(FORGET_TIME)) {
                 log.info(`Deleting ${providerId} from database due to being missing for longer than specified FORGET_TIME.`);
                 await deleteMovieEntry(providerId);
@@ -210,7 +209,11 @@ const sync = async () => {
     }
 }
 
-app.post('/hook', async (req, res) => {
+app.post('/bazarr', async (req, res) => {
+    log.info(req.body)
+});
+
+app.post('/emby', async (req, res) => {
     const body = req.body;
     const event = body.Event;
     const item = body.Item;
@@ -234,11 +237,12 @@ app.post('/hook', async (req, res) => {
         return res.sendStatus(200);
     }
 
+    const nowIso = new Date().toISOString()
     const entry = getMovieEntry(providerId);
     if (!entry) {
-        await handleMediaAdded(providerId, item).catch(log.error);
+        await handleMediaAdded(providerId, item, nowIso).catch(log.error);
     } else {
-        await handleExistingMedia(providerId, item, entry, new Date().toISOString()).catch(log.error);
+        await handleExistingMedia(providerId, item, entry, nowIso).catch(log.error);
     }
 
     res.sendStatus(200);
