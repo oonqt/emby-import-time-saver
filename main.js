@@ -209,12 +209,6 @@ const sync = async () => {
     }
 }
 
-app.get('/bazarr', async (req, res) => {
-    log.info(req.body);
-    log.info(req.params);
-    log.info(req.query);
-});
-
 app.post('/emby', async (req, res) => {
     const body = req.body;
     const event = body.Event;
