@@ -94,7 +94,7 @@ const handleExistingMedia = async (providerId, item, entry, nowISO) => {
         newBaseline = embyItemISO;
         log.info(`Updating baseline for ${providerId} (${item.Name}) from ${baselineISO} to ${newBaseline}`);
     }
-    
+
     if (embyItemMs > baselineMs) {
         try {
             log.info(`Updating Emby date for ${providerId} (${item.Name}) from ${item.DateCreated} to ${newBaseline}`);
@@ -154,30 +154,30 @@ const sync = async () => {
             for (const item of items) {
                 try {
                     const providerId = getProviderFromItem(item);
-    
+
                     if (!providerId) {
                         log.debug(`Skipping item due to missing providerId -- (${item.Name})`);
                         continue;
                     };
-    
+
                     log.debug(`Processing ${providerId} (${item.Name})`)
-    
+
                     seen.add(providerId);
-    
+
                     const entry = getMovieEntry(providerId);
-    
+
                     if (!entry) {
                         log.debug(`New media found ${providerId} (${item.Name})`);
-    
+
                         await handleMediaAdded(providerId, item, nowISO);
 
                         created++;
 
                         continue;
                     }
-    
+
                     const wasUpdated = await handleExistingMedia(providerId, item, entry, nowISO);
-    
+
                     if (wasUpdated) updated++;
                 } catch (err) {
                     log.error(`Error processing ${item.Name} (${item.Id})`, err);
@@ -209,8 +209,10 @@ const sync = async () => {
     }
 }
 
-app.post('/bazarr', async (req, res) => {
-    log.info(req.body)
+app.get('/bazarr', async (req, res) => {
+    log.info(req.body);
+    log.info(req.params);
+    log.info(req.query);
 });
 
 app.post('/emby', async (req, res) => {
@@ -228,7 +230,7 @@ app.post('/emby', async (req, res) => {
     if (!['Movie', 'Episode'].includes(item.Type)) {
         log.info(`Ignoring item of type: ${item.Type}`);
         return res.sendStatus(200);
-    } 
+    }
 
     const providerId = getProviderFromItem(item);
 
